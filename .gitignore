@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.env
+.DS_Store
+
+# Invariant 1: no dataset in git. Real findings may contain live credentials,
+# and the synthetic corpus is reproduced from its seed rather than committed.
+data/
