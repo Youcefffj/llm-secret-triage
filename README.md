@@ -89,9 +89,15 @@ A first, free pass that drops candidates which cannot be a credential. It reads
 lines, since that context is what the model layer is measured on. A candidate it
 drops never reaches the model, so its recall has to stay at 1.0.
 
-Four explicit rules — unresolved template expression, placeholder word, fewer
-than 8 characters, 3 distinct characters or fewer — plus an entropy floor that
-vendor token prefixes (`AKIA`, `ghp_`, `sk_live_`...) skip.
+Three explicit rules — unresolved template expression, placeholder word, 3
+distinct characters or fewer — plus an entropy floor that vendor token prefixes
+(`AKIA`, `ghp_`, `sk_live_`...) skip.
+
+In doubt, a value is kept and the model decides. A template expression drops a
+value only when it is the whole value, and a placeholder word never drops a value
+made of several fields (`user:pass`, a URL, a connection string): in
+`postgres://admin:…@${DB_HOST}`, the password next to the template may be real.
+There is no length rule either: `root12` is short, and still a password.
 
 ```bash
 $ uv run secret-triage prefilter-sweep
@@ -107,8 +113,7 @@ at the default floor (1.50):
   rule                  first match  only rule
   template_expression           556        556
   placeholder_token            1079       1079
-  too_short                     347          0
-  too_few_distinct               76          0
+  too_few_distinct              423        347
   low_entropy                     0          0
 
   false positives dropped
@@ -125,9 +130,9 @@ What this says:
   every easy one, a third of the medium ones, none of the hard ones — which is
   the intended split. The hard cases are for the model.
 - **Template expressions and placeholder words do most of the work.** The
-  length and distinct-character rules overlap: neither is needed alone, but
-  together they remove 423 false positives the other two miss (`null`, `TODO`,
-  `N/A`, `xxxx…`). The *only rule* column shows the first part, not the second.
+  distinct-character rule takes the 423 false positives they miss (`null`,
+  `TODO`, `N/A`, `xxxx…`); 76 of them, the `xxxx…` kind, sit under the entropy
+  floor too, hence 347 in the *only rule* column.
 - **The entropy floor adds nothing at its default.** Everything it catches, the
   distinct-character rule already catches. Raising it looks free up to 3.5, but
   it is not: the 140 extra drops at 2.0 are a single zero-padded test
@@ -137,8 +142,9 @@ What this says:
   log2(length): an 8-character password scores at most 3.0 however random it is.
   A floor at 3 would silently drop real short passwords — and none exist in this
   corpus, where every secret is 20 characters or more, so the sweep cannot show
-  that risk. The floor sits just under the least random 8-character value the
-  length and distinct rules let through.
+  that risk. The floor sits just under `aaaaabcd`, the least random value of 8
+  characters or fewer the distinct rule lets through, so it never decides a
+  short value on its own.
 - **Both numbers flatter the rules.** Synthetic secrets are long random strings
   no rule can match, so recall 1.0 here guards against regressions more than it
   proves anything. And the placeholder vocabulary and the easy false positives

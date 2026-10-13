@@ -40,6 +40,19 @@ def test_template_expressions_are_dropped(value):
     assert decide(value).reason == "template_expression"
 
 
+# literal text beside a template may be the secret itself: the model decides
+@pytest.mark.parametrize(
+    "value",
+    [
+        "postgres://admin:Zq8rT2vLp9@${DB_HOST}:5432/app",
+        "Zq8rT2vLp9${PEPPER}",
+        "<%= a %>Zq8rT2vLp9<%= b %>",
+    ],
+)
+def test_a_partial_template_is_kept(value):
+    assert decide(value).kept, value
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -57,9 +70,29 @@ def test_placeholder_tokens_are_dropped(value):
     assert "placeholder_token" in decide(value).fired
 
 
+# a placeholder host or user next to a real password: the password still counts
+@pytest.mark.parametrize(
+    "value",
+    [
+        "mysql://root:Zq8rT2vLp9@db.example.com/prod",
+        "changeme:Zq8rT2vLp9",
+        "Server=db;User=placeholder;Password=Zq8rT2vLp9",
+    ],
+)
+def test_a_placeholder_inside_a_composite_value_is_kept(value):
+    assert decide(value).kept, value
+
+
+# stubs still go, on their handful of distinct chars
 @pytest.mark.parametrize("value", ["null", "TODO", "none", "N/A", "-"])
-def test_short_values_are_dropped(value):
-    assert decide(value).reason == "too_short"
+def test_stubs_are_dropped(value):
+    assert decide(value).reason == "too_few_distinct"
+
+
+# no length rule: a short password is still a password
+@pytest.mark.parametrize("value", ["root12", "admin", "Pa55w0r"])
+def test_a_short_value_with_enough_variety_is_kept(value):
+    assert decide(value).kept, value
 
 
 @pytest.mark.parametrize("value", ["xxxxxxxxxxxxxxxx", "0000000000000000", "abababababababab"])
@@ -82,11 +115,13 @@ def test_a_vendor_prefix_does_not_skip_the_other_rules():
     assert decide("AKIAIOSFODNN7EXAMPLE").reason == "placeholder_token"
 
 
-# the least random 8-char value the length and distinct rules let through.
-# the default floor must never be what drops it
-def test_default_floor_sits_under_the_other_rules():
-    assert entropy("aaaaabcd") > prefilter.DEFAULT_MIN_ENTROPY
-    assert decide("aaaaabcd").kept
+# the least random values of 8 chars or fewer the distinct rule lets through.
+# the default floor must never be what drops them
+def test_default_floor_sits_under_the_distinct_rule():
+    for length in range(4, 9):
+        value = "a" * (length - 3) + "bcd"
+        assert entropy(value) > prefilter.DEFAULT_MIN_ENTROPY, value
+        assert decide(value).kept, value
 
 
 # 8 chars only over the full alphanumeric range: a random 8-char hex value has
@@ -117,7 +152,7 @@ def test_every_placeholder_token_is_long_enough_to_never_match_by_chance():
 
 def test_every_rule_can_fire():
     fired = set()
-    for value in ("${X}", "CHANGEME", "null", "xxxxxxxxxxxxxxxx", "aaaaaaaaaaaaaaaaabcd"):
+    for value in ("${X}", "CHANGEME", "xxxxxxxxxxxxxxxx", "aaaaaaaaaaaaaaaaabcd"):
         fired.update(decide(value, min_entropy=2.0).fired)
     assert fired == set(prefilter.RULES)
 

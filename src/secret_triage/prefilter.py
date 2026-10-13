@@ -7,7 +7,8 @@ package.
 
 Invariant 4: a dropped candidate never reaches the model, so a false drop is a
 miss nothing downstream can recover. Every rule is narrow and justifiable in one
-line, and the entropy floor is the only knob.
+line, and the entropy floor is the only knob. In doubt, a value is kept: the
+model is there to decide it.
 """
 
 import math
@@ -15,16 +16,14 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
-# below the usual 8-character password minimum: not a modern credential
-MIN_LENGTH = 8
-
+# no length rule: a short password (root12) is still a password, the model decides.
 # 3 distinct chars or fewer is a pattern (xxxx, 0000, abab), not a secret.
 # a random 8-char string looks like that about once in a million
 MIN_DISTINCT = 4
 
-# bits per char. set just under the least random 8-char value the two rules
-# above let through ("aaaaabcd", 1.55 bits), so the floor never overrides them
-# on short values. see `entropy` for why a higher floor is a trap
+# bits per char. set just under "aaaaabcd" (1.55 bits), the least random value
+# of 8 chars or fewer the rule above lets through, so the floor never decides a
+# short value on its own. see `entropy` for why a higher floor is a trap
 DEFAULT_MIN_ENTROPY = 1.5
 
 # every rule, in the order they're checked. the first one to fire is the
@@ -32,18 +31,19 @@ DEFAULT_MIN_ENTROPY = 1.5
 RULES = (
     "template_expression",
     "placeholder_token",
-    "too_short",
     "too_few_distinct",
     "low_entropy",
 )
 
-# a variable that was never filled in: the real value lives somewhere else
+# a variable that was never filled in: the real value lives somewhere else.
+# matched against the whole value only. with literal text around the template,
+# as in postgres://admin:pw@${DB_HOST}, that text may be the real secret
 _TEMPLATE_PATTERNS = (
     re.compile(r"\$\{[^{}]+\}"),  # ${API_KEY}
-    re.compile(r"\{\{[^{}]+\}\}"),  # {{ vault_pass }}, ${{ secrets.X }}
+    re.compile(r"\$?\{\{[^{}]+\}\}"),  # {{ vault_pass }}, ${{ secrets.X }}
     re.compile(r"%\([A-Za-z_]\w*\)s"),  # %(api_key)s
     re.compile(r"\$\([^()]+\)"),  # $(SECRET_TOKEN), $(cat /run/secrets/token)
-    re.compile(r"<%=?.+?%>"),  # <%= ENV['TOKEN'] %>
+    re.compile(r"<%=?[^%]+%>"),  # <%= ENV['TOKEN'] %>
 )
 
 # words people type to mean "no real value here", matched with case and
@@ -67,6 +67,10 @@ _PLACEHOLDER_TOKENS = (
     "yourpassword",
 )
 _SEPARATORS = str.maketrans("", "", "-_ .")
+
+# what joins several fields into one value: user@host, user:pass, key=v;key=v.
+# a placeholder in one field says nothing about the others, so the model decides
+_COMPOSITE = re.compile(r"[@:;]")
 
 # prefixes of real secret token formats. a value carrying one skips the entropy
 # floor: AKIA + 16 random chars measures low and is just as live.
@@ -119,12 +123,14 @@ def has_vendor_prefix(value: str) -> bool:
 def decide(value: str, *, min_entropy: float = DEFAULT_MIN_ENTROPY) -> Decision:
     """Run every rule on `value`. It is kept only if none of them fires."""
     normalized = value.lower().translate(_SEPARATORS)
+    placeholder = not _COMPOSITE.search(value) and any(
+        token in normalized for token in _PLACEHOLDER_TOKENS
+    )
     # all checks run, no short-circuit: knowing every rule that fired is what
     # lets us measure which rule catches something no other one would
     checks = (
-        ("template_expression", any(p.search(value) for p in _TEMPLATE_PATTERNS)),
-        ("placeholder_token", any(token in normalized for token in _PLACEHOLDER_TOKENS)),
-        ("too_short", len(value) < MIN_LENGTH),
+        ("template_expression", any(p.fullmatch(value) for p in _TEMPLATE_PATTERNS)),
+        ("placeholder_token", placeholder),
         ("too_few_distinct", len(set(value)) < MIN_DISTINCT),
         ("low_entropy", not has_vendor_prefix(value) and entropy(value) < min_entropy),
     )

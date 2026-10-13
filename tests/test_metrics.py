@@ -63,15 +63,15 @@ def test_only_rule_counts_drops_no_other_rule_would_make():
     corpus = [
         candidate("${API_KEY}", LABEL_NOT_SECRET),  # template, nothing else
         candidate("CHANGEME", LABEL_NOT_SECRET),  # placeholder, nothing else
-        candidate("xxxx", LABEL_NOT_SECRET),  # too short AND too few distinct
+        candidate("xxxx", LABEL_NOT_SECRET),  # too few distinct AND under the floor
     ]
-    rows = {row.rule: row for row in metrics.contributions(corpus, 0.0)}
+    rows = {row.rule: row for row in metrics.contributions(corpus, 2.0)}
 
     assert rows["template_expression"].only_rule == 1
     assert rows["placeholder_token"].only_rule == 1
-    assert rows["too_short"].first_match == 1
-    assert rows["too_short"].only_rule == 0
+    assert rows["too_few_distinct"].first_match == 1
     assert rows["too_few_distinct"].only_rule == 0
+    assert rows["low_entropy"].only_rule == 0
 
 
 def test_unlabelled_candidates_are_left_out():
