@@ -6,33 +6,55 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, labeler, metrics, prefilter, synthetic
+from . import __version__, labeler, metrics, pipeline, prefilter, synthetic
 from .config import CORPUS_DIR, SCANS_DIR
 from .models import LABEL_NOT_SECRET, LABEL_SECRET, read_jsonl, write_jsonl
 from .scanners import gitleaks
+from .sources import folder
 
 
 # runs when you type: secret-triage scan /Volumes/share
 def _scan(args: argparse.Namespace) -> int:
     print(f"scanning {args.folder}...", file=sys.stderr)
     try:
-        candidates = gitleaks.scan(args.folder)
+        scan = pipeline.run(folder.walk(args.folder), progress=_progress)
     except gitleaks.GitleaksError as error:
-        print(f"error: {error}", file=sys.stderr)
+        print(f"\nerror: {error}", file=sys.stderr)
         return 1
     # timestamped, so a second scan never overwrites the labels of the first
     out = SCANS_DIR / f"{args.folder.resolve().name}-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
-    write_jsonl(out, candidates)
+    write_jsonl(out, scan.candidates)
 
-    decisions = [prefilter.decide(candidate.match) for candidate in candidates]
+    print(f"\r{scan.read} files read, {len(scan.unread)} not read", file=sys.stderr)
+    decisions = [prefilter.decide(candidate.match) for candidate in scan.candidates]
     dropped = collections.Counter(d.reason for d in decisions if not d.kept)
-    print(f"{len(candidates)} findings", file=sys.stderr)
+    print(f"{len(scan.candidates)} findings", file=sys.stderr)
     print(f"  to review  {sum(d.kept for d in decisions):>5}", file=sys.stderr)
     for reason, count in dropped.most_common():
         print(f"  dropped    {count:>5}  ({reason})", file=sys.stderr)
+    if scan.unread:
+        # a password in one of these went unseen: the list says which ones to open by hand
+        unread_list = out.with_name(f"{out.stem}-unread.txt")
+        unread_list.write_text(
+            "".join(
+                f"{u.reason}\t{u.path}" + (f"\t{u.detail}" if u.detail else "") + "\n"
+                for u in sorted(scan.unread, key=lambda u: (u.reason, u.path))
+            ),
+            encoding="utf-8",
+        )
+        print("not read", file=sys.stderr)
+        reasons = collections.Counter(u.reason for u in scan.unread)
+        for reason, count in reasons.most_common():
+            print(f"  {count:>5}  {reason}", file=sys.stderr)
+        print(f"  list: {unread_list}", file=sys.stderr)
     # stdout gets the path alone, so this works: secret-triage review $(secret-triage scan X)
     print(out)
     return 0
+
+
+def _progress(done: int) -> None:
+    if done % 100 == 0:
+        print(f"\r{done} files...", end="", file=sys.stderr, flush=True)
 
 
 # runs when you type: secret-triage review data/scans/share-20261013-142501.jsonl
@@ -176,7 +198,8 @@ def main(argv: list[str] | None = None) -> int:
 
     scan = subcommands.add_parser(
         "scan",
-        help="run gitleaks on a folder (a mounted share, a synced library) and save the findings",
+        help="read every file of a folder (a mounted share, a synced library, .zip included) "
+        "and save the passwords and keys found",
     )
     scan.add_argument("folder", type=Path, help="folder to scan")
     scan.set_defaults(handler=_scan)

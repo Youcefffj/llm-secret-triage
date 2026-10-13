@@ -51,3 +51,22 @@ def test_scan_then_review_lists_what_to_fix(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "1 real, 0 not real, 0 still to review" in out
     assert f"{share / 'acces.txt'}:2  (password-assignment)" in out
+
+
+# what could not be read is counted on screen and listed in a file next to the scan
+def test_scan_lists_the_files_it_could_not_read(tmp_path, monkeypatch, capsys, make_ole):
+    monkeypatch.setattr("secret_triage.scanners.gitleaks.find_binary", lambda: "gitleaks")
+    monkeypatch.setattr("secret_triage.scanners.gitleaks.scan", lambda documents: [])
+    monkeypatch.setattr("secret_triage.cli.SCANS_DIR", tmp_path / "scans")
+    share = tmp_path / "share"
+    share.mkdir()
+    (share / "notes.txt").write_text("rien ici")
+    (share / "paie.xlsx").write_bytes(make_ole({"EncryptedPackage": b"\0" * 64}))
+
+    assert main(["scan", str(share)]) == 0
+    err = capsys.readouterr().err
+
+    assert "1 files read, 1 not read" in err
+    assert "1  encrypted" in err
+    (unread_list,) = (tmp_path / "scans").glob("share-*-unread.txt")
+    assert unread_list.read_text() == f"encrypted\t{share / 'paie.xlsx'}\n"

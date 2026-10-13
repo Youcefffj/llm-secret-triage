@@ -5,7 +5,9 @@ description = "LLM triage layer that separates real credentials from false posit
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "pypdf>=6.20.1",
+]
 
 [project.scripts]
 secret-triage = "secret_triage.cli:main"

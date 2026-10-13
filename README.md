@@ -7,8 +7,8 @@ alone they look the same.
 This repository contains:
 
 - `scan` and `review`: find the passwords and keys lying in a folder — a mounted
-  file share, a synced library — then go through them one by one and get the
-  list of what needs fixing;
+  file share, a synced library — inside its Word, Excel, PDF and zip files too,
+  then go through them one by one and get the list of what needs fixing;
 - a generator for a labelled synthetic corpus of such findings, reproducible
   from a seed;
 - a deterministic prefilter that drops the findings which cannot be a
@@ -18,7 +18,8 @@ This repository contains:
 
 Python 3.10 or later, [uv](https://docs.astral.sh/uv/), and, for `scan`,
 [gitleaks](https://github.com/gitleaks/gitleaks/releases) on the `PATH` (tested
-with 8.30.1). No other dependencies: the tool itself is standard library only.
+with 8.30.1). One Python dependency, [pypdf](https://pypi.org/project/pypdf/),
+for PDFs; everything else is the standard library.
 
 ## Install
 
@@ -33,36 +34,69 @@ uv sync
 ```bash
 $ uv run secret-triage scan share
 scanning share...
-4 findings
-  to review      3
+5 files read, 2 not read
+5 findings
+  to review      4
   dropped        1  (placeholder_token)
-data/scans/share-20261013-210704.jsonl
+not read
+      1  binary
+      1  encrypted
+  list: data/scans/share-20261013-232532-unread.txt
+data/scans/share-20261013-232532.jsonl
 ```
 
-gitleaks runs with its own rules plus one for a password written next to its
-label (`password=`, `pwd:`, `mot de passe :`, `MDP wifi:`…): its defaults look
-for high-entropy keys and miss `Password: Welcome1`. The prefilter then sets
-aside what cannot be a secret, `changeme` here. gitleaks reads text files only:
-a password inside a Word or Excel document is not found, and files over 50 MB
-are skipped.
+Every file is opened once: its text is extracted, scanned, and let go. Nothing
+of it is kept but its findings.
+
+| Files | Read |
+|---|---|
+| any text: `.txt` `.ps1` `.sh` `.ini` `.env` `.config` `.json` `.xml` `.html`… | as is, UTF-8, UTF-16 or Windows' cp1252 |
+| Word, Excel, PowerPoint (`.docx` `.xlsx` `.pptx`, macro and template variants) | body, headers, footers, comments, notes, and text deleted with track changes on |
+| Word, Excel, PowerPoint 97-2003 (`.doc` `.xls` `.ppt`) | text, every cell, every slide, without Office installed |
+| Outlook messages (`.msg`) | subject, body, recipients |
+| OpenDocument (`.odt` `.ods` `.odp`) | body |
+| PDF | its text layer |
+| CSV, TSV | as a table |
+| `.zip` | like a folder, zips inside it included |
+
+A table (Word, Excel, OpenDocument, CSV) comes out row by row, then each row
+again cell by cell under its column name: a password in a column headed
+*Mot de passe* reads `Mot de passe: …`, like one written by hand.
+
+gitleaks runs over that text with its own rules plus two: a password next to its
+label (`password=`, `pwd:`, `mot de passe :`, `MDP wifi:`, `Password | …` in a
+table) and a password inside a URL (`postgres://user:…@host`). Its defaults look
+for high-entropy keys and miss both. The prefilter then sets aside what cannot
+be a secret, `changeme` here. Each finding keeps the 100 characters before and
+after the value; in a document, its line number is the one in the extracted
+text.
+
+What could not be read is listed with the reason in `…-unread.txt`, next to the
+scan, so it can be opened by hand: Office files saved with a password,
+encrypted PDFs and zip entries, PDFs without a text layer
+(scans), files over 50 MB, damaged files, files the account may not open, and
+binaries.
 
 The scan file lands in `data/scans/` under the current directory and holds the
-raw values: keep it there.
+raw values: keep it there. The text goes to gitleaks through a private
+temporary folder, deleted after each batch.
 
 ```bash
-$ uv run secret-triage review data/scans/share-20261013-210704.jsonl
+$ uv run secret-triage review data/scans/share-20261013-232532.jsonl
 ...
-[3/3] share/it/deploy.ps1:3  (password-assignment)
-      $server = "srv-app01"
-      $user = "svc_backup"
-  >>  $password = "Welcome1!"
-      Invoke-Backup -Server $server
-real secret? [y]es [n]o [?] not sure [q]uit: n
-
-2 real, 1 not real, 0 still to review
+[2/4] share/compta/comptes.xlsx:5  (password-assignment)
+       Mot de passe
+  >>  intranet | admin | Soleil2024!
+      Application: intranet
+      Identifiant: admin
+  >>  Mot de passe: Soleil2024!
+real secret? [y]es [n]o [?] not sure [q]uit: y
+...
+3 real, 1 not real, 0 still to review
 to fix:
-  share/compta/acces.txt:3  (password-assignment)
-  share/compta/acces.txt:4  (password-assignment)
+  share/archives.zip/migration/notes.txt:1  (url-credentials)
+  share/compta/comptes.xlsx:5  (password-assignment)
+  share/it/procedure-2009.doc:3  (password-assignment)
 ```
 
 Every answer is written to the scan file at once: `q` or Ctrl-C stops, and the
