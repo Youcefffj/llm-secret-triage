@@ -1,24 +1,15 @@
 # llm-secret-triage
 
-Secret scanners find candidates. They cannot tell a live AWS key from a commit
-SHA, a documentation example or a test fixture, so the queue fills up with false
-positives, nobody works through it, and the pre-commit hook gets bypassed.
+Secret scanners flag anything shaped like a credential. A live AWS key comes out
+next to commit SHAs, documentation examples and test fixtures, and from the value
+alone they look the same.
 
-This project puts a language model between the scanner and you. It reads each
-finding in context and says whether it is a real credential, with a one-line
-reason you can check. The model is your choice: local on your laptop, a hosted
-API, or any OpenAI-compatible endpoint.
+This repository contains:
 
-## Status
-
-Early. Two phases out of six are finished. Nothing triages anything yet.
-
-- [x] **P1** — candidate schema, JSONL storage, masking, reproducible synthetic corpus
-- [x] **P2** — deterministic prefilter, recall held at 1.0
-- [ ] **P3** — real corpus from public repositories, labelled by hand
-- [ ] **P4** — triage against a local model
-- [ ] **P5** — multi-model benchmark, cost and latency
-- [ ] **P6** — SARIF output, GitHub Action, container image
+- a generator for a labelled synthetic corpus of such findings, reproducible
+  from a seed;
+- a deterministic prefilter that drops the findings which cannot be a
+  credential, reading the value alone, and a command that measures what it drops.
 
 ## Requirements
 
@@ -28,14 +19,12 @@ dependencies: the tool itself is standard library only.
 ## Install
 
 ```bash
-git clone <this repo>
+git clone https://github.com/Youcefffj/llm-secret-triage.git
 cd llm-secret-triage
 uv sync
 ```
 
-## What works today
-
-Generate a labelled benchmark corpus:
+## Synthetic corpus
 
 ```bash
 $ uv run secret-triage corpus --seed 42 --count 400
@@ -48,8 +37,8 @@ $ uv run secret-triage corpus --seed 42 --count 400
 data/corpus/synthetic-42-400.jsonl
 ```
 
-Same seed, same bytes, on any machine. That is how the benchmark stays
-reproducible without shipping a dataset. The file lands under `data/`, which is
+Same seed, same bytes: a test pins the SHA-256 of the seed-42 corpus, so the
+corpus is regenerated rather than shipped. The file lands under `data/`, which is
 gitignored.
 
 Each line is one candidate: where it was found, the value, the few lines around
@@ -63,10 +52,9 @@ it, and the true label (abridged here, the real record has 13 fields).
  "label": "secret", "difficulty": null}
 ```
 
-## The corpus
-
-30% real credentials. The false positives are graded, because a corpus made of
-`CHANGEME` and `${VAR}` gives any model a 99% score that means nothing.
+30% real credentials: the shape of the real thing, random contents, so none of
+them has ever worked anywhere. The false positives are graded, because a corpus
+made only of `CHANGEME` and `${VAR}` would be trivial to sort.
 
 | Grade | Share of false positives | Examples |
 |---|---|---|
@@ -76,26 +64,23 @@ it, and the true label (abridged here, the real record has 13 fields).
 
 The hard ones are the point. A commit SHA and an AWS secret key are the same
 object seen from the value alone: same length, same randomness, no threshold
-separates them. Only the variable name above them settles it — and that is
-exactly what the model layer is measured on.
+separates them. Only the variable name next to them settles it, so every value
+is placed under a plausible one: `GIT_COMMIT=` against `AWS_SECRET_ACCESS_KEY=`.
 
-Every value carries a plausible variable name for that reason: `GIT_COMMIT=`
-against `AWS_SECRET_ACCESS_KEY=` is the signal under test.
+## Prefilter
 
-## The prefilter
-
-A first, free pass that drops candidates which cannot be a credential. It reads
-**only the value** — never the variable name, the file path or the surrounding
-lines, since that context is what the model layer is measured on. A candidate it
-drops never reaches the model, so its recall has to stay at 1.0.
+Drops the candidates which cannot be a credential. It reads **only the value**,
+never the variable name, the file path or the surrounding lines; a test checks
+that the module imports nothing else from the package. A dropped candidate is
+gone for good, so recall has to stay at 1.0: not one real secret dropped.
 
 Three explicit rules — unresolved template expression, placeholder word, 3
 distinct characters or fewer — plus an entropy floor that vendor token prefixes
 (`AKIA`, `ghp_`, `sk_live_`...) skip.
 
-In doubt, a value is kept and the model decides. A template expression drops a
-value only when it is the whole value, and a placeholder word never drops a value
-made of several fields (`user:pass`, a URL, a connection string): in
+In doubt, a value is kept. A template expression drops a value only when it is
+the whole value, and a placeholder word never drops a value made of several
+fields (`user:pass`, a URL, a connection string): in
 `postgres://admin:…@${DB_HOST}`, the password next to the template may be real.
 There is no length rule either: `root12` is short, and still a password.
 
@@ -127,8 +112,8 @@ at the default floor (1.50):
 What this says:
 
 - **Recall 1.0 over 2400 secrets**, while over a third of the false positives go:
-  every easy one, a third of the medium ones, none of the hard ones — which is
-  the intended split. The hard cases are for the model.
+  every easy one, a third of the medium ones, none of the hard ones. The hard
+  ones are left alone on purpose: only their context settles them.
 - **Template expressions and placeholder words do most of the work.** The
   distinct-character rule takes the 423 false positives they miss (`null`,
   `TODO`, `N/A`, `xxxx…`); 76 of them, the `xxxx…` kind, sit under the entropy
@@ -148,8 +133,8 @@ What this says:
 - **Both numbers flatter the rules.** Synthetic secrets are long random strings
   no rule can match, so recall 1.0 here guards against regressions more than it
   proves anything. And the placeholder vocabulary and the easy false positives
-  come from the same hands. The real recall and drop rate come from
-  hand-labelled findings in P3.
+  come from the same hands. Nothing here measures either number on real
+  findings.
 
 ## Tests
 
@@ -158,26 +143,12 @@ uv run pytest
 uv run ruff check .
 ```
 
-## Security rules
+## Security
 
-This project handles live credentials once it runs against real repositories.
-The rules are enforced by the layout, not by good intentions.
-
-- **No dataset in git.** `data/` is gitignored in full. The synthetic corpus is
-  reproduced from its seed, never committed.
-- **Raw values stay local.** Anything exported carries a masked value and a
-  SHA-256 digest, and the raw string is stripped out of the surrounding context
-  too.
-- **Credentials are never verified.** The tool does not authenticate a
-  discovered key against its provider.
-
-## Where this is going
-
-One triage layer, any model. Local and hosted providers differ by base URL and
-auth, nothing else, so switching is a flag rather than a code change. The
-published numbers will come from a local model on a consumer laptop, with no
-network egress — an air-gapped setup is meant to be the default path, not a
-footnote.
+- **No dataset in git.** `data/` is gitignored in full: corpora are regenerated
+  from their seed, never committed.
+- **No network.** The tool makes no network call, so nothing it handles is ever
+  tested against a provider.
 
 ## License
 
