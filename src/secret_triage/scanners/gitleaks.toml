@@ -1,0 +1,17 @@
+# gitleaks' own rules look for high-entropy keys. On a file share the usual leak
+# is a human password written next to its label, which they miss: this file adds
+# a rule for it on top of the defaults.
+title = "secret-triage"
+
+[extend]
+useDefault = true
+
+# the label (password, pwd, mdp, mot de passe...), up to 20 chars of filler for
+# "MDP wifi :" or "Password for admin:", then = : or =>, then the value.
+# pwd, mdp and pass need a boundary in front, so bypass and cmdpath don't count
+[[rules]]
+id = "password-assignment"
+description = "Password written next to its label"
+regex = '''(?i)(?:passw(?:or)?d|passwort|mot.?de.?passe|(?:\b|_)(?:pwd|mdp|pass)\b)[\w .-]{0,20}?["']?\s*(?:=>|[:=])\s*["']?([^\s"'`;,<>]{4,})'''
+secretGroup = 1
+keywords = ["pass", "pwd", "mdp"]

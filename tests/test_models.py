@@ -31,8 +31,9 @@ def test_mask_keeps_length_and_reveals_three_plus_two():
 
 def test_mask_hides_short_values_entirely():
     assert mask("null") == "****"
-    assert mask("abcdefg") == "*******"
-    assert mask("REDACTED") == "RED***ED"
+    assert mask("Welcome1!") == "*********"
+    assert mask("a" * 19) == "*" * 19
+    assert mask("a" * 20) == "aaa" + "*" * 15 + "aa"
 
 
 def test_digest_is_the_sha256_of_the_value():

@@ -6,6 +6,9 @@ alone they look the same.
 
 This repository contains:
 
+- `scan` and `review`: find the passwords and keys lying in a folder — a mounted
+  file share, a synced library — then go through them one by one and get the
+  list of what needs fixing;
 - a generator for a labelled synthetic corpus of such findings, reproducible
   from a seed;
 - a deterministic prefilter that drops the findings which cannot be a
@@ -13,8 +16,9 @@ This repository contains:
 
 ## Requirements
 
-Python 3.10 or later, and [uv](https://docs.astral.sh/uv/). No other
-dependencies: the tool itself is standard library only.
+Python 3.10 or later, [uv](https://docs.astral.sh/uv/), and, for `scan`,
+[gitleaks](https://github.com/gitleaks/gitleaks/releases) on the `PATH` (tested
+with 8.30.1). No other dependencies: the tool itself is standard library only.
 
 ## Install
 
@@ -23,6 +27,48 @@ git clone https://github.com/Youcefffj/llm-secret-triage.git
 cd llm-secret-triage
 uv sync
 ```
+
+## Scan a folder
+
+```bash
+$ uv run secret-triage scan share
+scanning share...
+4 findings
+  to review      3
+  dropped        1  (placeholder_token)
+data/scans/share-20261013-210704.jsonl
+```
+
+gitleaks runs with its own rules plus one for a password written next to its
+label (`password=`, `pwd:`, `mot de passe :`, `MDP wifi:`…): its defaults look
+for high-entropy keys and miss `Password: Welcome1`. The prefilter then sets
+aside what cannot be a secret, `changeme` here. gitleaks reads text files only:
+a password inside a Word or Excel document is not found, and files over 50 MB
+are skipped.
+
+The scan file lands in `data/scans/` under the current directory and holds the
+raw values: keep it there.
+
+```bash
+$ uv run secret-triage review data/scans/share-20261013-210704.jsonl
+...
+[3/3] share/it/deploy.ps1:3  (password-assignment)
+      $server = "srv-app01"
+      $user = "svc_backup"
+  >>  $password = "Welcome1!"
+      Invoke-Backup -Server $server
+real secret? [y]es [n]o [?] not sure [q]uit: n
+
+2 real, 1 not real, 0 still to review
+to fix:
+  share/compta/acces.txt:3  (password-assignment)
+  share/compta/acces.txt:4  (password-assignment)
+```
+
+Every answer is written to the scan file at once: `q` or Ctrl-C stops, and the
+next `review` picks up where it left off. `--audit-dropped N` mixes in, unmarked,
+N findings the prefilter set aside; the summary then says how many of them were
+real secrets.
 
 ## Synthetic corpus
 

@@ -10,3 +10,6 @@ DATA_DIR = Path(os.environ.get("SECRET_TRIAGE_DATA_DIR", "data"))
 
 # generated corpora land here, e.g. data/corpus/synthetic-42-400.jsonl
 CORPUS_DIR = DATA_DIR / "corpus"
+
+# one file per scan, raw values and labels included, e.g. data/scans/share-20261013-142501.jsonl
+SCANS_DIR = DATA_DIR / "scans"

@@ -36,7 +36,7 @@ def test_seed_42_still_gives_the_same_corpus(tmp_path):
     write_jsonl(out, generate(seed=42, count=400))
 
     assert hashlib.sha256(out.read_bytes()).hexdigest() == (
-        "9210440e757ae111f4e89bf7b1c9da0792412377a801239489f81fde3634d120"
+        "0930448045c3dc2849958ee7b3b20779da2881a538e1dd7718ace3d1ec1c7a93"
     )
 
 

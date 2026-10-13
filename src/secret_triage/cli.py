@@ -3,11 +3,67 @@
 import argparse
 import collections
 import sys
+from datetime import datetime
 from pathlib import Path
 
-from . import __version__, metrics, prefilter, synthetic
-from .config import CORPUS_DIR
-from .models import LABEL_SECRET, write_jsonl
+from . import __version__, labeler, metrics, prefilter, synthetic
+from .config import CORPUS_DIR, SCANS_DIR
+from .models import LABEL_NOT_SECRET, LABEL_SECRET, read_jsonl, write_jsonl
+from .scanners import gitleaks
+
+
+# runs when you type: secret-triage scan /Volumes/share
+def _scan(args: argparse.Namespace) -> int:
+    print(f"scanning {args.folder}...", file=sys.stderr)
+    try:
+        candidates = gitleaks.scan(args.folder)
+    except gitleaks.GitleaksError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    # timestamped, so a second scan never overwrites the labels of the first
+    out = SCANS_DIR / f"{args.folder.resolve().name}-{datetime.now():%Y%m%d-%H%M%S}.jsonl"
+    write_jsonl(out, candidates)
+
+    decisions = [prefilter.decide(candidate.match) for candidate in candidates]
+    dropped = collections.Counter(d.reason for d in decisions if not d.kept)
+    print(f"{len(candidates)} findings", file=sys.stderr)
+    print(f"  to review  {sum(d.kept for d in decisions):>5}", file=sys.stderr)
+    for reason, count in dropped.most_common():
+        print(f"  dropped    {count:>5}  ({reason})", file=sys.stderr)
+    # stdout gets the path alone, so this works: secret-triage review $(secret-triage scan X)
+    print(out)
+    return 0
+
+
+# runs when you type: secret-triage review data/scans/share-20261013-142501.jsonl
+def _review(args: argparse.Namespace) -> int:
+    if not args.scan.is_file():
+        raise ValueError(f"no such scan file: {args.scan}")
+    if args.audit_dropped < 0:
+        raise ValueError(f"--audit-dropped must be 0 or more, got {args.audit_dropped}")
+    try:
+        labeler.review(args.scan, audit_dropped=args.audit_dropped)
+    except KeyboardInterrupt:  # every answer is already saved, ctrl-c just stops
+        print()
+
+    candidates = list(read_jsonl(args.scan))
+    labels = collections.Counter(candidate.label for candidate in candidates)
+    left = len(labeler.queue(candidates, args.audit_dropped))
+    print(
+        f"\n{labels[LABEL_SECRET]} real, {labels[LABEL_NOT_SECRET]} not real, "
+        f"{left} still to review"
+    )
+    to_fix = [candidate for candidate in candidates if candidate.label == LABEL_SECRET]
+    if to_fix:
+        print("to fix:")
+        for candidate in to_fix:
+            print(f"  {candidate.path}:{candidate.line}  ({candidate.rule})")
+    # labelled candidates the prefilter drops: only an audit puts them in front of you
+    audited = [c for c in candidates if c.label and not prefilter.decide(c.match).kept]
+    if audited:
+        missed = sum(candidate.label == LABEL_SECRET for candidate in audited)
+        print(f"prefilter: {missed} real secret(s) among the {len(audited)} drops reviewed")
+    return 0
 
 
 # runs when you type: secret-triage corpus --seed 42 --count 400
@@ -117,6 +173,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     # remember which function runs this subcommand
     corpus.set_defaults(handler=_corpus)
+
+    scan = subcommands.add_parser(
+        "scan",
+        help="run gitleaks on a folder (a mounted share, a synced library) and save the findings",
+    )
+    scan.add_argument("folder", type=Path, help="folder to scan")
+    scan.set_defaults(handler=_scan)
+
+    review = subcommands.add_parser(
+        "review",
+        help="go through a scan's findings one by one and say which are real secrets",
+    )
+    review.add_argument("scan", type=Path, help="scan file written by `secret-triage scan`")
+    review.add_argument(
+        "--audit-dropped",
+        type=int,
+        default=0,
+        help="mix in this many findings the prefilter dropped, to check it drops no real "
+        "secret (default: 0)",
+    )
+    review.set_defaults(handler=_review)
 
     prefilter_sweep = subcommands.add_parser(
         "prefilter-sweep",

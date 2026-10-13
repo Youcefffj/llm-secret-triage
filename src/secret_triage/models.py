@@ -15,8 +15,9 @@ DIFFICULTY_EASY = "easy"
 DIFFICULTY_MEDIUM = "medium"
 DIFFICULTY_HARD = "hard"
 
-# Below this length a value has too little to reveal: mask it whole.
-_MASK_MIN_LENGTH = 8
+# Below this length, showing 3 + 2 chars gives too much away: half of a short
+# password would be on screen. Mask it whole. At 20, 15 chars stay hidden.
+_MASK_MIN_LENGTH = 20
 _MASK_PREFIX = 3
 _MASK_SUFFIX = 2
 
