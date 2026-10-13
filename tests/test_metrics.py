@@ -3,7 +3,7 @@ import hashlib
 import pytest
 
 from secret_triage import metrics, prefilter
-from secret_triage.models import LABEL_NOT_SECRET, LABEL_SECRET, Candidate
+from secret_triage.models import LABEL_NOT_SECRET, LABEL_SECRET, Candidate, Verdict
 from secret_triage.synthetic import generate
 
 
@@ -104,3 +104,84 @@ def test_lowest_secret_entropy_ignores_vendor_prefixed_secrets():
     ]
     assert metrics.lowest_secret_entropy(corpus) == 4.0
     assert metrics.lowest_secret_entropy([]) is None
+
+
+def verdict(candidate_id: str, answer: str | None, *, latency=1.0, at=1.0, **fields) -> Verdict:
+    values = {
+        "candidate_id": candidate_id,
+        "verdict": answer,
+        "confidence": 0.9 if answer else None,
+        "reason": "",
+        "error": None if answer else "HTTP 503",
+        "replied": answer is not None,
+        "tokens_in": 400,
+        "tokens_out": 40,
+        "cost_usd": None,
+        "latency": latency,
+        "at": at,
+    }
+    values.update(fields)
+    return Verdict(**values)
+
+
+def test_precision_recall_and_f1():
+    scores = metrics.Scores(
+        true_positives=8, false_positives=2, false_negatives=2, true_negatives=88
+    )
+    assert (scores.precision, scores.recall) == (0.8, 0.8)
+    assert scores.f1 == pytest.approx(0.8)
+
+
+def test_nothing_flagged_or_nothing_to_find_does_not_divide_by_zero():
+    assert metrics.Scores().precision == 0.0
+    assert metrics.Scores().recall == 1.0
+    assert metrics.Scores().f1 == 0.0
+
+
+def test_the_scanner_alone_flags_everything():
+    corpus = [
+        candidate("Welcome1!", LABEL_SECRET),
+        candidate("CHANGEME", LABEL_NOT_SECRET),
+        candidate("Soleil2024", None),  # unlabelled: left out
+    ]
+    assert metrics.scanner_alone(corpus) == metrics.Scores(true_positives=1, false_positives=1)
+
+
+def test_with_triage_each_candidate_ends_where_the_layers_put_it():
+    secret, sha, placeholder, failed, unsent = (
+        candidate("Welcome1!", LABEL_SECRET),
+        candidate("4f9c2a1e7b3d5f8a0c6e9b2d4f7a1c3e5b8d0f2a", LABEL_NOT_SECRET),
+        candidate("CHANGEME", LABEL_NOT_SECRET),  # dropped by the prefilter
+        candidate("Hiver-2023", LABEL_SECRET),  # sent, the call failed
+        candidate("Bonjour2025", LABEL_SECRET),  # sent, the run stopped before it
+    )
+    sent = {secret.id, sha.id, failed.id, unsent.id}
+    verdicts = [
+        verdict(secret.id, LABEL_SECRET),
+        verdict(sha.id, LABEL_NOT_SECRET),
+        verdict(failed.id, None),  # no answer: kept for a human, so counted as flagged
+    ]
+    scores = metrics.with_triage([secret, sha, placeholder, failed, unsent], sent, verdicts)
+    assert scores == metrics.Scores(true_positives=2, true_negatives=2)
+
+
+def test_latency_is_read_on_the_second_half_of_the_batch():
+    verdicts = [verdict(str(n), LABEL_SECRET, latency=float(n), at=float(n)) for n in range(1, 11)]
+    verdicts.reverse()  # written in the order they came, read in the order of `at`
+    timing = metrics.timing(verdicts)
+    assert timing.tail == 5
+    assert (timing.latency_p50, timing.latency_p95) == (8.0, 10.0)
+    assert (timing.wall_seconds, timing.tokens_out) == (10.0, 400)
+    assert timing.tokens_per_second == 40.0
+    assert timing.cost_usd is None
+
+
+def test_failed_calls_count_in_the_tokens_but_not_in_the_latency():
+    verdicts = [
+        verdict("a", LABEL_SECRET, latency=3.0, at=3.0, cost_usd=0.002),
+        verdict("b", None, latency=0.0, at=9.0, tokens_in=None, tokens_out=None),
+    ]
+    timing = metrics.timing(verdicts)
+    assert (timing.calls, timing.replied, timing.tail) == (2, 1, 1)
+    assert timing.latency_p95 == 3.0
+    assert timing.cost_usd == 0.002

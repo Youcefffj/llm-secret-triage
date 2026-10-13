@@ -12,7 +12,10 @@ This repository contains:
 - a generator for a labelled synthetic corpus of such findings, reproducible
   from a seed;
 - a deterministic prefilter that drops the findings which cannot be a
-  credential, reading the value alone, and a command that measures what it drops.
+  credential, reading the value alone, and a command that measures what it drops;
+- `triage`: a model reads each remaining finding in its context and says whether
+  it is a real secret, with its precision and recall measured against the
+  scanner alone.
 
 ## Requirements
 
@@ -20,6 +23,10 @@ Python 3.10 or later, [uv](https://docs.astral.sh/uv/), and, for `scan`,
 [gitleaks](https://github.com/gitleaks/gitleaks/releases) on the `PATH` (tested
 with 8.30.1). One Python dependency, [pypdf](https://pypi.org/project/pypdf/),
 for PDFs; everything else is the standard library.
+
+For `triage`, a model: a local server speaking the OpenAI chat API
+([LM Studio](https://lmstudio.ai), Ollama, llama.cpp), or the `claude` or `codex`
+CLI of a subscription. No API key is needed.
 
 ## Install
 
@@ -216,6 +223,68 @@ What this says:
   come from the same hands. Nothing here measures either number on real
   findings.
 
+## Triage
+
+```bash
+$ uv run secret-triage triage data/corpus/synthetic-42-400.jsonl
+400 candidates, 292 sent to google/gemma-4-12b-qat (local, prompt v1, raw values, they stay on this machine)
+292 answered (0 unusable), 0 calls failed
+  131704 tokens in, 14130 out, 27m36s, 8.5 tok/s
+  latency p50 5.3s, p95 6.3s, on the last 146 answers
+                          precision  recall     f1
+  scanner alone               0.300   1.000  0.462
+  + prefilter + model         0.682   1.000  0.811
+data/runs/synthetic-42-400-local-google-gemma-4-12b-qat-v1-20261014-000136.jsonl
+```
+
+What the prefilter drops stays out, 108 candidates here. Every other one goes to
+the model with its file, its rule and the 100 characters around it, under a
+versioned prompt: `v1`, pinned by a test, so a better wording becomes `v2` and
+never changes what an earlier run meant. The answer must be
+`{"verdict", "confidence", "reason"}`, and the local provider constrains the
+model to that JSON schema. An answer that doesn't parse is kept as it came and
+counted as unusable, never turned into a verdict. A failed call is tried three
+times, and five failures in a row stop the run. A finding left without a verdict
+counts as flagged: it goes to a human.
+
+| Provider | What answers | Sees |
+|---|---|---|
+| `local` (default) | any server speaking the OpenAI chat API, at `--base-url` (default: LM Studio, `http://localhost:1234/v1`) | raw values |
+| `claude-code` | the `claude` CLI on its own login, tools off, run from an empty folder | masked values |
+| `codex` | the `codex` CLI on its own login | masked values |
+
+Running a batch on a subscription is up to you and that subscription's terms.
+`--limit 50` takes the first 50 candidates and estimates how long the whole file
+would take: a smoke run before a long one. `--include-dropped` sends the
+prefilter's drops to the model as well. `--concurrency N` keeps N calls in
+flight.
+
+The run file in `data/runs/` holds the settings on its first line (provider,
+model, prompt version, source file and its SHA-256), then one line per answer as
+it arrives: verdict, confidence, reason, tokens, latency, and cost when the
+provider gives one. A run cut short keeps what it got.
+
+What this says, for Gemma 4 12B QAT (Q4_0, in LM Studio, on a MacBook Air M5
+with 24 GB):
+
+- **No real secret lost.** All 120 kept, while precision goes from 0.30 to 0.68:
+  56 of the 280 false positives are still flagged.
+- **Hard cases read from their name.** No commit SHA, checksum or UUID is
+  flagged, one cache ETag and one SSH public key are. What gets through: test
+  fixture signatures (13 of 18), base64-encoded plaintext (13 of 19), request
+  nonces (6 of 14). Random-looking, under a name that doesn't settle it.
+- **Medium cases are the weak spot.** A key marked as rotated in a changelog is
+  flagged every time (12 of 12), a vendor test key 10 times out of 12. They have
+  the exact shape of a live key, and nothing in 100 characters says they are
+  dead. Published sample tokens: 0 of 8.
+- **The confidence says nothing.** 1.0 on 213 answers, 0.9 on the other 79: no
+  threshold can be swept on it.
+- **No thinking.** Gemma 4 reasons before answering by default, about 300 tokens
+  and 30 s a call here. The local provider sends `reasoning_effort: "none"`: 5 s
+  a call.
+- **Same caveat as the prefilter.** The corpus and the prompt come from the same
+  hands. Numbers on real findings will come from reviewed scans.
+
 ## Tests
 
 ```bash
@@ -227,8 +296,12 @@ uv run ruff check .
 
 - **No dataset in git.** `data/` is gitignored in full: corpora are regenerated
   from their seed, never committed.
-- **No network.** The tool makes no network call, so nothing it handles is ever
-  tested against a provider.
+- **No credential is ever tried.** Nothing the tool finds is tested against the
+  service it belongs to.
+- **Raw values stay on the machine.** `scan` and `review` make no network call.
+  `triage` sends raw values to a local model server only; the `claude` and
+  `codex` CLIs, which send what they get to a hosted model, are given masked
+  values and masked context.
 
 ## License
 

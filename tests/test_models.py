@@ -1,6 +1,19 @@
 import json
 
-from secret_triage.models import Candidate, digest, mask, read_jsonl, write_jsonl
+import pytest
+
+from secret_triage.models import (
+    Candidate,
+    Run,
+    Verdict,
+    append_verdict,
+    digest,
+    mask,
+    read_jsonl,
+    read_run,
+    write_jsonl,
+    write_run,
+)
 
 
 # a throwaway candidate to test on. pass any field to override it
@@ -90,3 +103,51 @@ def test_public_export_masks_the_value_inside_the_context():
     assert "ghp_realvaluehere0000" not in exported["context"]
     assert mask("ghp_realvaluehere0000") in exported["context"]
     assert "line before" in exported["context"]
+
+
+def make_verdict(candidate_id: str, **overrides) -> Verdict:
+    fields = {
+        "candidate_id": candidate_id,
+        "verdict": "secret",
+        "confidence": 0.9,
+        "reason": "a password in a script",
+        "error": None,
+        "replied": True,
+        "tokens_in": 420,
+        "tokens_out": 38,
+        "cost_usd": None,
+        "latency": 5.2,
+        "at": 5.3,
+    }
+    fields.update(overrides)
+    return Verdict(**fields)
+
+
+def test_a_run_file_reads_back_as_written(tmp_path):
+    run = Run(
+        started_at="2026-10-14T00:10:00",
+        provider="local",
+        model="google/gemma-4-12b-qat",
+        prompt_version="v1",
+        source="data/corpus/synthetic-42-400.jsonl",
+        source_sha256="0930448045c3dc2849958ee7b3b20779da2881a538e1dd7718ace3d1ec1c7a93",
+        masked=False,
+        include_dropped=False,
+        limit=50,
+        concurrency=1,
+    )
+    path = tmp_path / "runs" / "run.jsonl"
+    write_run(path, run)
+    first = make_verdict("a")
+    failed = make_verdict("b", verdict=None, confidence=None, error="HTTP 503", replied=False)
+    append_verdict(path, first)
+    append_verdict(path, failed)
+
+    assert read_run(path) == (run, [first, failed])
+
+
+def test_a_file_that_is_no_run_is_refused(tmp_path):
+    path = tmp_path / "scan.jsonl"
+    write_jsonl(path, [make_candidate()])
+    with pytest.raises(ValueError, match="not a run file"):
+        read_run(path)

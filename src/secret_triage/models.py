@@ -1,9 +1,9 @@
-"""The candidate schema: one scanner finding, its masking and its JSONL form."""
+"""The schemas, and their files: a scanner finding and its masking, a verdict, a triage run."""
 
 import hashlib
 import json
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 # the only two answers a candidate can get. None means nobody labelled it yet
@@ -146,3 +146,63 @@ def read_jsonl(path: Path) -> Iterator[Candidate]:
             # skip blank lines
             if line:
                 yield Candidate.from_dict(json.loads(line))
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """A model's answer on one candidate, and what it cost.
+
+    No answer it can use (the call failed, the reply didn't parse) leaves `verdict`
+    None and says why in `error`. It is never turned into a guess.
+    """
+
+    candidate_id: str
+    verdict: str | None             # secret / not_secret, the same words as a label
+    confidence: float | None        # 0 to 1, as the model put it
+    reason: str
+    error: str | None
+    replied: bool                   # the provider answered, even if the answer didn't parse
+    tokens_in: int | None           # None: the provider didn't say
+    tokens_out: int | None
+    cost_usd: float | None          # None: the provider didn't say, or there is no price
+    latency: float                  # seconds, request to answer, last attempt only
+    at: float                       # seconds since the run started, when the answer came
+
+
+@dataclass(frozen=True)
+class Run:
+    """What a triage run was: enough to trace any of its numbers back (invariant 6)."""
+
+    started_at: str                 # ISO 8601, local time
+    provider: str
+    model: str
+    prompt_version: str
+    source: str                     # the scan or corpus file the candidates came from
+    source_sha256: str
+    masked: bool                    # the model saw masked values, not raw ones
+    include_dropped: bool           # the prefilter's drops went to the model too
+    limit: int | None               # only the first `limit` candidates of the source
+    concurrency: int
+
+
+def write_run(path: Path, run: Run) -> None:
+    """Start a run file: its description on the first line, verdicts to follow."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps({"run": asdict(run)}, ensure_ascii=False) + "\n")
+
+
+def append_verdict(path: Path, verdict: Verdict) -> None:
+    """One more line, as each answer arrives: a run cut short keeps what it got."""
+    with path.open("a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps({"verdict": asdict(verdict)}, ensure_ascii=False) + "\n")
+
+
+def read_run(path: Path) -> tuple[Run, list[Verdict]]:
+    """A run file back: its description, and its verdicts in the order they came."""
+    with path.open(encoding="utf-8") as handle:
+        records = [json.loads(line) for line in handle if line.strip()]
+    if not records or "run" not in records[0]:
+        raise ValueError(f"not a run file: {path}")
+    verdicts = [Verdict(**record["verdict"]) for record in records[1:]]
+    return Run(**records[0]["run"]), verdicts

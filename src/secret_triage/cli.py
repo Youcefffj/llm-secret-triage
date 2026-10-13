@@ -2,13 +2,27 @@
 
 import argparse
 import collections
+import hashlib
+import re
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, labeler, metrics, pipeline, prefilter, synthetic
-from .config import CORPUS_DIR, SCANS_DIR
-from .models import LABEL_NOT_SECRET, LABEL_SECRET, read_jsonl, write_jsonl
+from . import __version__, labeler, metrics, pipeline, prefilter, prompts, synthetic, triage
+from .config import CORPUS_DIR, DEFAULT_MODELS, LOCAL_BASE_URL, RUNS_DIR, SCANS_DIR
+from .models import (
+    LABEL_NOT_SECRET,
+    LABEL_SECRET,
+    Candidate,
+    Run,
+    Verdict,
+    append_verdict,
+    read_jsonl,
+    read_run,
+    write_jsonl,
+    write_run,
+)
 from .scanners import gitleaks
 from .sources import folder
 
@@ -86,6 +100,130 @@ def _review(args: argparse.Namespace) -> int:
         missed = sum(candidate.label == LABEL_SECRET for candidate in audited)
         print(f"prefilter: {missed} real secret(s) among the {len(audited)} drops reviewed")
     return 0
+
+
+# runs when you type: secret-triage triage data/scans/share-20261013-142501.jsonl
+def _triage(args: argparse.Namespace) -> int:
+    if not args.file.is_file():
+        raise ValueError(f"no such file: {args.file}")
+    if args.limit is not None and args.limit < 1:
+        raise ValueError(f"--limit must be at least 1, got {args.limit}")
+    if args.concurrency < 1:
+        raise ValueError(f"--concurrency must be at least 1, got {args.concurrency}")
+    everything = list(read_jsonl(args.file))
+    candidates = everything[: args.limit]
+    # the prefilter decides here: triage itself never knows it exists
+    to_send = [c for c in candidates if args.include_dropped or prefilter.decide(c.match).kept]
+    provider = _provider(args)
+    prompt = prompts.CURRENT
+
+    started = datetime.now()
+    model = re.sub(r"[^\w.-]+", "-", provider.model)
+    name = f"{args.file.stem}-{provider.name}-{model}-{prompt.version}-{started:%Y%m%d-%H%M%S}"
+    out = RUNS_DIR / f"{name}.jsonl"
+    write_run(
+        out,
+        Run(
+            started_at=started.isoformat(timespec="seconds"),
+            provider=provider.name,
+            model=provider.model,
+            prompt_version=prompt.version,
+            source=str(args.file),
+            source_sha256=hashlib.sha256(args.file.read_bytes()).hexdigest(),
+            masked=provider.masked,
+            include_dropped=args.include_dropped,
+            limit=args.limit,
+            concurrency=args.concurrency,
+        ),
+    )
+    shown = "masked values" if provider.masked else "raw values, they stay on this machine"
+    print(
+        f"{len(candidates)} candidates, {len(to_send)} sent to {provider.model} "
+        f"({provider.name}, prompt {prompt.version}, {shown})",
+        file=sys.stderr,
+    )
+
+    done = 0
+
+    def save(verdict: Verdict) -> None:
+        nonlocal done
+        append_verdict(out, verdict)
+        done += 1
+        print(f"\r{done}/{len(to_send)}", end="", file=sys.stderr, flush=True)
+
+    status = 0
+    try:
+        triage.run(to_send, provider, prompt, concurrency=args.concurrency, on_verdict=save)
+    except triage.RunAborted as error:
+        print(f"\nstopped: {error}", file=sys.stderr)
+        status = 1
+    except KeyboardInterrupt:
+        print("\nstopped, the answers so far are saved", file=sys.stderr)
+    _print_run(everything, candidates, to_send, read_run(out)[1], args.include_dropped)
+    print(out)
+    return status
+
+
+def _provider(args: argparse.Namespace) -> triage.Provider:
+    model = args.model or DEFAULT_MODELS[args.provider]
+    if args.provider == "local":
+        return triage.local(model, args.base_url)
+    if args.provider == "claude-code":
+        return triage.claude_code(model)
+    return triage.codex(model)
+
+
+def _print_run(
+    everything: Sequence[Candidate],
+    candidates: Sequence[Candidate],
+    to_send: Sequence[Candidate],
+    verdicts: Sequence[Verdict],
+    include_dropped: bool,
+) -> None:
+    timing = metrics.timing(verdicts)
+    unusable = sum(verdict.replied and verdict.verdict is None for verdict in verdicts)
+    print(
+        f"\r{timing.replied} answered ({unusable} unusable), "
+        f"{timing.calls - timing.replied} calls failed",
+        file=sys.stderr,
+    )
+    print(
+        f"  {timing.tokens_in} tokens in, {timing.tokens_out} out, "
+        f"{_duration(timing.wall_seconds)}, {timing.tokens_per_second:.1f} tok/s",
+        file=sys.stderr,
+    )
+    print(
+        f"  latency p50 {timing.latency_p50:.1f}s, p95 {timing.latency_p95:.1f}s, "
+        f"on the last {timing.tail} answers",
+        file=sys.stderr,
+    )
+    if timing.cost_usd is not None:
+        print(f"  ${timing.cost_usd:.4f} at API prices", file=sys.stderr)
+    if len(candidates) < len(everything) and verdicts:
+        # a smoke run: what the whole file would take at the same pace
+        whole = sum(include_dropped or prefilter.decide(c.match).kept for c in everything)
+        estimate = timing.wall_seconds * whole / len(verdicts)
+        print(f"  the whole file: {whole} to send, about {_duration(estimate)}", file=sys.stderr)
+    if any(candidate.label is not None for candidate in candidates):
+        sent = {candidate.id for candidate in to_send}
+        rows = [
+            ("scanner alone", metrics.scanner_alone(candidates)),
+            ("+ prefilter + model", metrics.with_triage(candidates, sent, verdicts)),
+        ]
+        print("                          precision  recall     f1", file=sys.stderr)
+        for label, scores in rows:
+            print(
+                f"  {label:<22} {scores.precision:10.3f} {scores.recall:7.3f} {scores.f1:6.3f}",
+                file=sys.stderr,
+            )
+
+
+def _duration(seconds: float) -> str:
+    minutes, seconds = divmod(round(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{seconds:02d}s" if minutes else f"{seconds}s"
 
 
 # runs when you type: secret-triage corpus --seed 42 --count 400
@@ -217,6 +355,40 @@ def main(argv: list[str] | None = None) -> int:
         "secret (default: 0)",
     )
     review.set_defaults(handler=_review)
+
+    triage_command = subcommands.add_parser(
+        "triage",
+        help="ask a model, finding by finding, whether it is a real secret",
+    )
+    triage_command.add_argument("file", type=Path, help="a scan file, or a labelled corpus")
+    triage_command.add_argument(
+        "--provider",
+        choices=list(DEFAULT_MODELS),
+        default="local",
+        help="local: a model server on this machine, it sees the raw values. claude-code, "
+        "codex: that subscription's CLI, it sees masked values only (default: local)",
+    )
+    triage_command.add_argument(
+        "--model",
+        help="the model, named as the provider names it (default: "
+        + ", ".join(f"{name} {model or 'its own'}" for name, model in DEFAULT_MODELS.items())
+        + ")",
+    )
+    triage_command.add_argument(
+        "--base-url",
+        default=LOCAL_BASE_URL,
+        help=f"OpenAI-compatible endpoint of --provider local (default: {LOCAL_BASE_URL})",
+    )
+    triage_command.add_argument(
+        "--limit", type=int, help="only the first N candidates: a smoke run before the real one"
+    )
+    triage_command.add_argument(
+        "--include-dropped", action="store_true", help="send the prefilter's drops to the model too"
+    )
+    triage_command.add_argument(
+        "--concurrency", type=int, default=1, help="calls in flight at once (default: 1)"
+    )
+    triage_command.set_defaults(handler=_triage)
 
     prefilter_sweep = subcommands.add_parser(
         "prefilter-sweep",
