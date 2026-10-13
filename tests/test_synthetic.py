@@ -1,4 +1,5 @@
 import collections
+import hashlib
 import json
 import os
 import subprocess
@@ -25,6 +26,18 @@ def test_same_seed_produces_the_same_bytes(tmp_path):
     write_jsonl(second, generate(seed=42, count=400))
 
     assert first.read_bytes() == second.read_bytes()
+
+
+# pins the corpus itself, not just two runs agreeing with each other. a change in
+# draw order, or in python's `random` between versions, moves this hash. changing
+# the generator on purpose means updating it on purpose
+def test_seed_42_still_gives_the_same_corpus(tmp_path):
+    out = tmp_path / "corpus.jsonl"
+    write_jsonl(out, generate(seed=42, count=400))
+
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == (
+        "9210440e757ae111f4e89bf7b1c9da0792412377a801239489f81fde3634d120"
+    )
 
 
 def test_a_different_seed_produces_a_different_corpus():
